@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Flappy Car</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #10101c;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    font-family: "Trebuchet MS", Verdana, sans-serif;
+    touch-action: manipulation;
+    -webkit-user-select: none; user-select: none;
+  }
+  #wrap {
+    position: relative;
+    box-shadow: 0 20px 60px rgba(0,0,0,.7);
+    border-radius: 10px;
+    overflow: hidden;
+    line-height: 0;
+  }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="400" height="600"></canvas></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const cvs = document.getElementById("game");
+  const ctx = cvs.getContext("2d");
+  const W = cvs.width, H = cvs.height;
+
+  /* ---------- Config ---------- */
+  const GROUND_H   = 90;
+  const SKY_H      = H - GROUND_H;
+  const GRAVITY    = 0.42;
+  const FLAP       = -7.4;
+  const PIPE_W     = 64;
+  const PIPE_GAP   = 205;     // ← bigger gap
+  const PIPE_SPEED = 2.7;
+  const PIPE_INT   = 92;      // frames between pipes
+  const CAR_X      = 100;
+  const CAR_R      = 14;      // collision radius
+
+  /* ---------- State ---------- */
+  let car, pipes, score, best, state, frame, scroll, spawnTimer, flash, overCooldown;
+
+  best = Number(localStorage.getItem("flappyCarBest") || 0);
+
+  /* ---------- Audio ---------- */
+  let actx = null;
+  function initAudio() {
+    if (actx) return;
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
+  }
+  function beep(freq, dur, type = "square", vol = 0.05) {
+    if (!actx) return;
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, actx.currentTime);
+    g.gain.setValueAtTime(vol, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + dur);
+  }
+
+  /* ---------- Reset / Start ---------- */
+  function reset() {
+    car   = { y: SKY_H / 2 - 30, vy: 0, rot: 0 };
+    pipes = [];
+    score = 0;
+    frame = 0;
+    scroll = 0;
+    spawnTimer = 70;
+    flash = 0;
+    overCooldown = 0;
+    state = "ready";
+  }
+
+  function startGame() {
+    state = "playing";
+    car.vy = FLAP;
+    spawnTimer = 70;
+    beep(700, 0.06, "square", 0.04);
+  }
+
+  function die() {
+    if (state !== "playing") return;
+    state = "over";
+    overCooldown = 0.45;
+    flash = 0.8;
+    beep(200, 0.14, "sawtooth", 0.07);
+    setTimeout(() => beep(120, 0.28, "sawtooth", 0.07), 110);
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem("flappyCarBest", String(best)); } catch (e) {}
+    }
+  }
+
+  /* ---------- Input ---------- */
+  function onInput(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    initAudio();
+    if (state === "ready") {
+      startGame();
+    } else if (state === "playing") {
+      car.vy = FLAP;
+      beep(680, 0.05, "square", 0.035);
+    } else if (state === "over" && overCooldown <= 0) {
+      reset();
+      startGame();
+    }
+  }
+
+  window.addEventListener("pointerdown", onInput, { passive: false });
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+      e.preventDefault();
+      if (!e.repeat) onInput(null);
+    }
+  });
+  window.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  /* ---------- Pipes ---------- */
+  function spawnPipe() {
+    const margin = 70;
+    const minC = margin + PIPE_GAP / 2;
+    const maxC = SKY_H - margin - PIPE_GAP / 2;
+    const cy = minC + Math.random() * (maxC - minC);
+    pipes.push({ x: W + 20, cy, scored: false });
+  }
+
+  function hitRect(cx, cy, r, rx, ry, rw, rh) {
+    const nx = Math.max(rx, Math.min(cx, rx + rw));
+    const ny = Math.max(ry, Math.min(cy, ry + rh));
+    const dx = cx - nx, dy = cy - ny;
+    return dx * dx + dy * dy < r * r;
+  }
+
+  /* ---------- Update ---------- */
+  function update(dt) {
+    frame += dt;
+    scroll += PIPE_SPEED * dt;
+    if (flash > 0) flash = Math.max(0, flash - 0.06 * dt);
+
+    /* --- ready --- */
+    if (state === "ready") {
+      car.y = SKY_H / 2 - 30 + Math.sin(frame / 16) * 8;
+      car.rot = Math.sin(frame / 16) * 0.08;
+      return;
+    }
+
+    /* --- game over (car falls) --- */
+    if (state === "over") {
+      overCooldown = Math.max(0, overCooldown - dt / 60);
+      car.vy += GRAVITY * dt;
+      car.y += car.vy * dt;
+      if (car.y > SKY_H - CAR_R) { car.y = SKY_H - CAR_R; car.vy = 0; }
+      car.rot = Math.min(car.rot + 0.08 * dt, Math.PI / 2);
+      return;
+    }
+
+    /* --- playing --- */
+    car.vy += GRAVITY * dt;
+    car.y += car.vy * dt;
+
+    const targetRot = Math.max(-0.35, Math.min(1.3, car.vy * 0.075));
+    car.rot += (targetRot - car.rot) * Math.min(1, 0.15 * dt);
+
+    // ceiling
+    if (car.y - CAR_R < 0) { car.y = CAR_R; car.vy = 0; }
+
+    // spawn
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) { spawnPipe(); spawnTimer = PIPE_INT; }
+
+    // move + collide
+    for (let i = pipes.length - 1; i >= 0; i--) {
+      const p = pipes[i];
+      p.x -= PIPE_SPEED * dt;
+
+      if (p.x + PIPE_W < -30) { pipes.splice(i, 1); continue; }
+
+      if (!p.scored && p.x + PIPE_W < CAR_X) {
+        p.scored = true;
+        score++;
+        beep(980, 0.08, "sine", 0.05);
+      }
+
+      const topH = p.cy - PIPE_GAP / 2;
+      const botY = p.cy + PIPE_GAP / 2;
+
+      if (hitRect(CAR_X, car.y, CAR_R, p.x, -200, PIPE_W, topH + 200) ||
+          hitRect(CAR_X, car.y, CAR_R, p.x, botY, PIPE_W, SKY_H - botY + 20)) {
+        die();
+        return;
+      }
+    }
+
+    // ground
+    if (car.y + CAR_R >= SKY_H) {
+      car.y = SKY_H - CAR_R;
+      die();
+    }
+  }
+
+  /* ---------- Drawing helpers ---------- */
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function text(str, x, y, size, align = "center", fill = "#fff", stroke = "rgba(0,0,0,.35)", lw = 5) {
+    ctx.font = "bold " + size + 'px "Trebuchet MS", Verdana, sans-serif';
+    ctx.textAlign = align;
+    ctx.textBaseline = "middle";
+    if (stroke) { ctx.lineWidth = lw; ctx.strokeStyle = stroke; ctx.strokeText(str, x, y); }
+    ctx.fillStyle = fill;
+    ctx.fillText(str, x, y);
+  }
+
+  /* ---------- Background ---------- */
+  function drawHills(color, amp, yBase, speed, phase) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, SKY_H);
+    for (let x = 0; x <= W; x += 8) {
+      const t = (x + scroll * speed + phase) * 0.012;
+      const y = yBase + Math.sin(t) * amp + Math.sin(t * 2.7) * amp * 0.35;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, SKY_H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawCloud(x, y, s) {
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    ctx.beginPath();
+    ctx.arc(x, y, 20 * s, 0, Math.PI * 2);
+    ctx.arc(x + 22 * s, y + 6 * s, 15 * s, 0, Math.PI * 2);
+    ctx.arc(x - 22 * s, y + 7 * s, 14 * s, 0, Math.PI * 2);
+    ctx.arc(x + 6 * s, y - 12 * s, 15 * s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, SKY_H);
+    g.addColorStop(0, "#3fa9c9");
+    g.addColorStop(0.55, "#7fd3e0");
+    g.addColorStop(1, "#d8f3f6");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, SKY_H);
+
+    ctx.fillStyle = "rgba(255,255,210,.5)";
+    ctx.beginPath();
+    ctx.arc(310, 85, 48, 0, Math.PI * 2);
+    ctx.fill();
+
+    const drift = (scroll * 0.08) % 500;
+    drawCloud(70 - drift + 500, 100, 1.0);
+    drawCloud(70 - drift, 100, 1.0);
+    drawCloud(280 - drift * 0.7 + 500, 170, 0.75);
+    drawCloud(280 - drift * 0.7, 170, 0.75);
+
+    drawHills("#8fd9c0", 22, SKY_H - 42, 0.25, 0);
+    drawHills("#6ec9a8", 18, SKY_H - 18, 0.45, 300);
+  }
+
+  /* ---------- Ground ---------- */
+  function drawGround() {
+    ctx.fillStyle = "#ded895";
+    ctx.fillRect(0, SKY_H, W, GROUND_H);
+
+    ctx.fillStyle = "#7cc32f";
+    ctx.fillRect(0, SKY_H, W, 14);
+
+    const off = -(scroll % 24);
+    ctx.fillStyle = "#5fa821";
+    for (let x = off - 24; x < W + 24; x += 24) {
+      ctx.beginPath();
+      ctx.moveTo(x, SKY_H + 14);
+      ctx.lineTo(x + 12, SKY_H + 14);
+      ctx.lineTo(x + 6, SKY_H);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    ctx.fillStyle = "rgba(0,0,0,.055)";
+    for (let x = off - 24; x < W + 24; x += 24) {
+      ctx.fillRect(x, SKY_H + 24, 12, GROUND_H - 24);
+    }
+
+    ctx.fillStyle = "rgba(0,0,0,.12)";
+    ctx.fillRect(0, SKY_H + 14, W, 3);
+  }
+
+  /* ---------- Pipes ---------- */
+  function pipeGradient(x, w) {
+    const g = ctx.createLinearGradient(x, 0, x + w, 0);
+    g.addColorStop(0.00, "#4a9c2a");
+    g.addColorStop(0.22, "#96e85f");
+    g.addColorStop(0.55, "#63b83a");
+    g.addColorStop(1.00, "#35701d");
+    return g;
+  }
+
+  function drawPipeBody(x, y, w, h, isTop) {
+    if (h <= 0) return;
+
+    ctx.fillStyle = pipeGradient(x, w);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#2f6b19";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+
+    const capH = 26;
+    const capX = x - 5;
+    const capW = w + 10;
+    const capY = isTop ? y + h - capH : y;
+
+    ctx.fillStyle = pipeGradient(capX, capW);
+    ctx.fillRect(capX, capY, capW, capH);
+    ctx.strokeStyle = "#2f6b19";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(capX + 1, capY + 1, capW - 2, capH - 2);
+  }
+
+  function drawPipe(p) {
+    const topH = p.cy - PIPE_GAP / 2;
+    const botY = p.cy + PIPE_GAP / 2;
+    drawPipeBody(p.x, -40, PIPE_W, topH + 40, true);
+    drawPipeBody(p.x, botY, PIPE_W, SKY_H - botY, false);
+  }
+
+  /* ---------- Car ---------- */
+  function drawWheel(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    // tire
+    ctx.fillStyle = "#1c1c22";
+    ctx.beginPath();
+    ctx.arc(0, 0, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // hub
+    ctx.fillStyle = "#cfd6dd";
+    ctx.beginPath();
+    ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // spinning spokes
+    ctx.strokeStyle = "#8b929a";
+    ctx.lineWidth = 1.2;
+    ctx.rotate(scroll * 0.12);
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(-3, 0);
+      ctx.lineTo(3, 0);
+      ctx.stroke();
+      ctx.rotate(Math.PI / 3);
+    }
+
+    ctx.restore();
+  }
+
+  function drawCar() {
+    ctx.save();
+    ctx.translate(CAR_X, car.y);
+    ctx.rotate(car.rot);
+
+    // wheels first (sit under the body)
+    drawWheel(-11, 8);
+    drawWheel(11, 8);
+
+    // ---- body ----
+    const bg = ctx.createLinearGradient(0, -18, 0, 12);
+    bg.addColorStop(0, "#ff8a7a");
+    bg.addColorStop(0.4, "#e8322a");
+    bg.addColorStop(1, "#8f0f0d");
+
+    ctx.beginPath();
+    ctx.moveTo(-22, 5);
+    ctx.lineTo(-22, -3);
+    ctx.quadraticCurveTo(-22, -8, -17, -8);
+    ctx.lineTo(-13, -8);
+    ctx.lineTo(-7, -16.5);          // rear pillar
+    ctx.lineTo(5, -16.5);           // roof
+    ctx.lineTo(11.5, -8);           // windshield
+    ctx.lineTo(20, -8);
+    ctx.quadraticCurveTo(23, -8, 23, -3);
+    ctx.lineTo(23, 5);
+    ctx.quadraticCurveTo(23, 9, 19, 9);
+    ctx.lineTo(-18, 9);
+    ctx.quadraticCurveTo(-22, 9, -22, 5);
+    ctx.closePath();
+    ctx.fillStyle = bg;
+    ctx.fill();
+    ctx.strokeStyle = "#6d0a09";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // ---- windows ----
+    ctx.fillStyle = "#c9ecff";
+    ctx.beginPath();
+    ctx.moveTo(-5.5, -15.2);
+    ctx.lineTo(3.5, -15.2);
+    ctx.lineTo(9, -9.8);
+    ctx.lineTo(-11.5, -9.8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "#4a7f96";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // window pillar
+    ctx.beginPath();
+    ctx.moveTo(-1.2, -15.2);
+    ctx.lineTo(-1.6, -9.8);
+    ctx.strokeStyle = "#a81c17";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // ---- headlight ----
+    ctx.fillStyle = "#ffe680";
+    roundRect(17.5, -4, 5.5, 4.5, 1.5);
+    ctx.fill();
+    ctx.strokeStyle = "#c9a300";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // ---- taillight ----
+    ctx.fillStyle = "#ffb703";
+    roundRect(-22, -3.5, 3.5, 4, 1.2);
+    ctx.fill();
+
+    // ---- side skirt shadow ----
+    ctx.fillStyle = "rgba(0,0,0,.18)";
+    ctx.fillRect(-18, 6.5, 36, 2.2);
+
+    ctx.restore();
+  }
+
+  /* ---------- UI ---------- */
+  function drawUI() {
+    if (state === "playing" || state === "over") {
+      text(String(score), W / 2, 82, 54, "center", "#ffffff", "rgba(0,0,0,.35)", 7);
+    }
+
+    if (state === "ready") {
+      text("FLAPPY CAR", W / 2, 130, 40, "center", "#ffffff", "rgba(0,0,0,.35)", 7);
+      text("BEST  " + best, W / 2, 176, 16, "center", "#fff8cc", "rgba(0,0,0,.3)", 4);
+
+      ctx.globalAlpha = 0.55 + Math.sin(frame / 14) * 0.45;
+      text("TAP  /  SPACE  TO  FLAP", W / 2, 405, 19, "center", "#ffffff", "rgba(0,0,0,.35)", 5);
+      ctx.globalAlpha = 1;
+    }
+
+    if (state === "over") {
+      ctx.fillStyle = "rgba(0,0,0,.5)";
+      roundRect(58, 158, 284, 232, 18);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,.18)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      text("GAME OVER", W / 2, 200, 30, "center", "#ffd166", "rgba(0,0,0,.45)", 6);
+
+      text("SCORE", W / 2, 245, 14, "center", "rgba(255,255,255,.65)", null);
+      text(String(score), W / 2, 278, 40, "center", "#ffffff", "rgba(0,0,0,.45)", 6);
+
+      text("BEST  " + best, W / 2, 322, 17, "center", "#9fe6ff", "rgba(0,0,0,.4)", 4);
+
+      if (overCooldown <= 0) {
+        ctx.globalAlpha = 0.55 + Math.sin(frame / 12) * 0.45;
+        text("TAP TO RESTART", W / 2, 364, 17, "center", "#ffffff", "rgba(0,0,0,.4)", 4);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  /* ---------- Main draw ---------- */
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawBackground();
+    for (let i = 0; i < pipes.length; i++) drawPipe(pipes[i]);
+    drawGround();
+    drawCar();
+    drawUI();
+
+    if (flash > 0) {
+      ctx.fillStyle = "rgba(255,255,255," + flash + ")";
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  /* ---------- Loop ---------- */
+  let last = performance.now();
+  function loop(now) {
+    let dt = (now - last) / (1000 / 60);
+    last = now;
+    if (dt > 3) dt = 3;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  /* ---------- Responsive scaling ---------- */
+  function fit() {
+    const scale = Math.min(
+      window.innerWidth / W,
+      window.innerHeight / H,
+      1.4
+    );
+    cvs.style.width = Math.round(W * scale) + "px";
+    cvs.style.height = Math.round(H * scale) + "px";
+  }
+  window.addEventListener("resize", fit);
+  window.addEventListener("orientationchange", fit);
+
+  /* ---------- Go ---------- */
+  fit();
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
